@@ -36,116 +36,89 @@ function initializeAdHighlighter() {
     'apple.com',
     'technodom.kz'
   ];
+const domainRegex = new RegExp(`(^|\\.)(?:${myDomains.map(d => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`);
 
-  function escapeRegExp(string) {
-    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
+  // Кэшируем селекторы и проверки
+  const isSponsored = (text) => text.toLowerCase().includes('sponsored') || text.includes('Реклама');
+  const isAdLink = (node) => {
+    const dataRw = node.getAttribute('data-rw');
+    const dataPcu = node.getAttribute('data-pcu');
+    return (dataRw?.includes('aclk?sa=') || dataPcu?.includes('https://ad.doubleclick.net/'));
+  };
 
-  const domainRegex = new RegExp(
-    myDomains.map((domain) => `(^|\\.)${escapeRegExp(domain)}$`).join('|')
-  );
+  // Объединяем стили в один объект
+  const styles = {
+    ad: { color: 'black', border: '2px solid red' },
+    domain: { backgroundColor: '#009159', color: 'white' }
+  };
 
-  function highlightAd(element) {
-    element.style.color = 'black';
-    element.style.border = '2px solid red';
-  }
+  // Применение стилей одним вызовом
+  const applyStyles = (element, styleObj) => Object.assign(element.style, styleObj);
 
   function checkAndHighlightDomain(link, topDiv) {
-    let href = link.getAttribute('href');
-    if (href) {
-      try {
-        let url = new URL(href);
-        if (domainRegex.test(url.hostname)) {
-          topDiv.style.backgroundColor = '#009159';
-          topDiv.style.color = 'white';
-        }
-      } catch (e) {
-        // Игнорируем некорректные URL
-      }
-    }
+    try {
+      const url = new URL(link.href);
+      if (domainRegex.test(url.hostname)) applyStyles(topDiv, styles.domain);
+    } catch (e) {}
   }
 
-  function markAds(node) {
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
+  function markAds(node, isRoot = false) {
+    if (node.nodeType !== 1) return; // Только элементы
 
-    // Проверка на рекламу
+    // Обрабатываем только конкретные теги
     if (node.tagName === 'SPAN' || node.tagName === 'A') {
-      let parentDiv = node.parentElement;
-      if (node.tagName === 'SPAN') {
-        if (
-          node.textContent.toLowerCase().includes('sponsored') ||
-          node.textContent.includes('Реклама')
-        ) {
-          highlightAd(parentDiv);
-        }
+      const parentDiv = node.parentElement;
+      
+      if (node.tagName === 'SPAN' && isSponsored(node.textContent)) {
+        applyStyles(parentDiv, styles.ad);
       } else if (node.tagName === 'A') {
-        let dataRw = node.getAttribute('data-rw');
-        let dataPcu = node.getAttribute('data-pcu');
-        if (
-          (dataRw && dataRw.includes('aclk?sa=')) ||
-          (dataPcu && dataPcu.includes('https://ad.doubleclick.net/'))
-        ) {
-          highlightAd(parentDiv);
+        if (isAdLink(node) || node.href.includes('googleadservices.com')) {
+          const adDiv = node.closest('div');
+          if (adDiv) applyStyles(adDiv, styles.ad);
         }
+        // Проверка доменов только для ссылок
+        const topDiv = node.closest('div > div');
+        if (topDiv) checkAndHighlightDomain(node, topDiv);
       }
     }
 
-    // Проверка на соответствие доменам из списка
-    if (node.tagName === 'A') {
-      let topDiv = node.closest('div > div');
-      if (topDiv) {
-        checkAndHighlightDomain(node, topDiv);
-      }
+    // Ограничиваем рекурсию для крупных узлов
+    if (isRoot || node.childElementCount < 50) {
+      for (const child of node.children) markAds(child);
     }
-
-    // Проверка на наличие ссылок с googleadservices.com
-    if (
-      node.tagName === 'A' &&
-      node.href &&
-      node.href.includes('googleadservices.com')
-    ) {
-      let adDiv = node.closest('div');
-      if (adDiv) {
-        highlightAd(adDiv);
-      }
-    }
-
-    // Рекурсивно проверяем дочерние элементы
-    node.childNodes.forEach(markAds);
   }
 
+  // Оптимизированный MutationObserver
   const observer = new MutationObserver((mutations) => {
-    mutations.forEach((mutation) => {
+    const visited = new Set(); // Избегаем повторной обработки
+    for (const mutation of mutations) {
       if (mutation.type === 'childList') {
-        mutation.addedNodes.forEach(markAds);
-      } else if (mutation.type === 'attributes') {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType === 1 && !visited.has(node)) {
+            visited.add(node);
+            markAds(node);
+          }
+        }
+      } else if (mutation.type === 'attributes' && !visited.has(mutation.target)) {
+        visited.add(mutation.target);
         markAds(mutation.target);
       }
-    });
+    }
   });
 
-  const config = { childList: true, subtree: true, attributes: true };
+  // Запускаем с оптимизированным конфигом
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'data-rw', 'data-pcu'] });
 
-  observer.observe(document.body, config);
+  // Начальная обработка с таймаутом для асинхронности
+  setTimeout(() => markAds(document.body, true), 0);
 
-  // Начальная маркировка существующих элементов
-  markAds(document.body);
-
-  // Функция для остановки наблюдения (если потребуется)
-  function stopObserving() {
-    observer.disconnect();
-  }
-
-  // Возвращаем функцию stopObserving, если нужно будет остановить наблюдение извне
-  return stopObserving;
+  return () => observer.disconnect();
 }
 
-// Запускаем функцию после загрузки DOM
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initializeAdHighlighter);
-} else {
-  initializeAdHighlighter();
-}
+// Запуск с оптимизацией
+document.readyState === 'loading' 
+  ? document.addEventListener('DOMContentLoaded', initializeAdHighlighter)
+  : setTimeout(initializeAdHighlighter, 0);
 
 ```
 
